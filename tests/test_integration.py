@@ -336,7 +336,13 @@ def test_filesystem_row_complex_type(flink_gateway_url: str):
                 tags        MAP<STRING, INT> NOT NULL,
                 player_map  MAP<STRING, ROW<score INT, level STRING>> NOT NULL,
                 ts_array    ARRAY<TIMESTAMP(3)> NOT NULL,
-                row_array   ARRAY<ROW<name STRING, val INT>> NOT NULL
+                row_array   ARRAY<ROW<name STRING, val INT>> NOT NULL,
+                deep_map    MAP<STRING, ROW<
+                    label STRING,
+                    nested_map MAP<STRING, ROW<
+                        ts TIMESTAMP(3)
+                    >>
+                >> NOT NULL
             ) WITH (
                 'connector' = 'filesystem',
                 'format' = 'json',
@@ -359,7 +365,17 @@ def test_filesystem_row_complex_type(flink_gateway_url: str):
                      TIMESTAMP '2024-01-01 10:00:00.000',
                      TIMESTAMP '2024-06-15 14:30:00.000'
                  ],
-                 ARRAY[ROW('x', 10), ROW('y', 20)]
+                 ARRAY[ROW('x', 10), ROW('y', 20)],
+                 MAP[
+                     'env1',
+                     ROW(
+                         'prod',
+                         MAP[
+                             'svc1',
+                             ROW(TIMESTAMP '2024-03-15 09:30:00.000')
+                         ]
+                     )
+                 ]
                 ),
                 (2, 'beta',
                  ROW(20, 'B'),
@@ -367,7 +383,19 @@ def test_filesystem_row_complex_type(flink_gateway_url: str):
                  MAP['c', 3],
                  MAP['p2', ROW(200, 'silver'), 'p3', ROW(300, 'bronze')],
                  ARRAY[TIMESTAMP '2025-12-25 00:00:00.000'],
-                 ARRAY[ROW('z', 30)]
+                 ARRAY[ROW('z', 30)],
+                 MAP[
+                     'env2',
+                     ROW(
+                         'staging',
+                         MAP[
+                             'svc2',
+                             ROW(TIMESTAMP '2025-06-01 12:00:00.000'),
+                             'svc3',
+                             ROW(TIMESTAMP '2025-07-04 18:45:00.000')
+                         ]
+                     )
+                 ]
                 )
         """,
         )
@@ -419,3 +447,23 @@ def test_filesystem_row_complex_type(flink_gateway_url: str):
     assert r[5]["p3"]["level"] == "bronze"
     assert r[6][0] == datetime.datetime(2025, 12, 25, 0, 0, 0)
     assert r[7][0] == {"name": "z", "val": 30}
+
+    # ── deep_map assertions ────────────────────────────────────────
+    # Row 1
+    r = by_id[1]
+    dm = r[8]
+    assert dm["env1"]["label"] == "prod"
+    assert dm["env1"]["nested_map"]["svc1"]["ts"] == datetime.datetime(
+        2024, 3, 15, 9, 30, 0
+    )
+
+    # Row 2
+    r = by_id[2]
+    dm = r[8]
+    assert dm["env2"]["label"] == "staging"
+    assert dm["env2"]["nested_map"]["svc2"]["ts"] == datetime.datetime(
+        2025, 6, 1, 12, 0, 0
+    )
+    assert dm["env2"]["nested_map"]["svc3"]["ts"] == datetime.datetime(
+        2025, 7, 4, 18, 45, 0
+    )
