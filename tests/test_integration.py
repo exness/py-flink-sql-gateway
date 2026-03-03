@@ -336,7 +336,7 @@ def test_filesystem_row_complex_type(flink_gateway_url: str):
                 tags        MAP<STRING, INT> NOT NULL,
                 player_map  MAP<STRING, ROW<score INT, level STRING>> NOT NULL,
                 ts_array    ARRAY<TIMESTAMP(3)> NOT NULL,
-                row_array   ARRAY<ROW<name STRING, value INT>> NOT NULL
+                row_array   ARRAY<ROW<name STRING, val INT>> NOT NULL
             ) WITH (
                 'connector' = 'filesystem',
                 'format' = 'json',
@@ -403,11 +403,11 @@ def test_filesystem_row_complex_type(flink_gateway_url: str):
     assert r[6][0] == datetime.datetime(2024, 1, 1, 10, 0, 0)
     assert r[6][1] == datetime.datetime(2024, 6, 15, 14, 30, 0)
 
-    # ARRAY<ROW<name STRING, value INT>>
+    # ARRAY<ROW<name STRING, val INT>>
     arr = r[7]
     assert len(arr) == 2
-    assert arr[0] == {"name": "x", "value": 10}
-    assert arr[1] == {"name": "y", "value": 20}
+    assert arr[0] == {"name": "x", "val": 10}
+    assert arr[1] == {"name": "y", "val": 20}
 
     # ── Row 2 ──────────────────────────────────────────────────────
     r = by_id[2]
@@ -418,4 +418,4 @@ def test_filesystem_row_complex_type(flink_gateway_url: str):
     assert r[5]["p2"]["score"] == 200
     assert r[5]["p3"]["level"] == "bronze"
     assert r[6][0] == datetime.datetime(2025, 12, 25, 0, 0, 0)
-    assert r[7][0] == {"name": "z", "value": 30}
+    assert r[7][0] == {"name": "z", "val": 30}
