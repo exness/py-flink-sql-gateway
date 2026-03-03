@@ -425,12 +425,12 @@ class TestRecursiveDecoding:
     """Tests for recursive ROW and MAP decoding."""
 
     def test_row_decodes_children(self):
-        """A ROW with INT + STRING children should decode field values."""
+        """A ROW with INT + STRING fields should decode field values."""
         from flink_gateway.models import ColumnInfo, LogicalType
 
         lt = LogicalType(
             type="ROW",
-            children=[
+            fields=[
                 ColumnInfo(name="score", logical_type=LogicalType(type="INTEGER")),
                 ColumnInfo(name="label", logical_type=LogicalType(type="VARCHAR")),
             ],
@@ -445,13 +445,13 @@ class TestRecursiveDecoding:
 
         inner_lt = LogicalType(
             type="ROW",
-            children=[
+            fields=[
                 ColumnInfo(name="x", logical_type=LogicalType(type="DOUBLE")),
             ],
         )
         outer_lt = LogicalType(
             type="ROW",
-            children=[
+            fields=[
                 ColumnInfo(name="id", logical_type=LogicalType(type="INTEGER")),
                 ColumnInfo(name="nested", logical_type=inner_lt),
             ],
@@ -466,14 +466,12 @@ class TestRecursiveDecoding:
 
     def test_map_decodes_values(self):
         """A MAP<STRING, INT> should decode string values to int."""
-        from flink_gateway.models import ColumnInfo, LogicalType
+        from flink_gateway.models import LogicalType
 
         lt = LogicalType(
             type="MAP",
-            children=[
-                ColumnInfo(name="KEY", logical_type=LogicalType(type="VARCHAR")),
-                ColumnInfo(name="VALUE", logical_type=LogicalType(type="INTEGER")),
-            ],
+            key_type=LogicalType(type="VARCHAR"),
+            value_type=LogicalType(type="INTEGER"),
         )
         ft = normalize_flink_type("MAP")
         result = decode_field({"apples": "3", "bananas": "5"}, ft, logical_type=lt)
@@ -485,16 +483,14 @@ class TestRecursiveDecoding:
 
         row_lt = LogicalType(
             type="ROW",
-            children=[
+            fields=[
                 ColumnInfo(name="score", logical_type=LogicalType(type="INTEGER")),
             ],
         )
         lt = LogicalType(
             type="MAP",
-            children=[
-                ColumnInfo(name="KEY", logical_type=LogicalType(type="VARCHAR")),
-                ColumnInfo(name="VALUE", logical_type=row_lt),
-            ],
+            key_type=LogicalType(type="VARCHAR"),
+            value_type=row_lt,
         )
         ft = normalize_flink_type("MAP")
         result = decode_field(
@@ -528,7 +524,7 @@ class TestRecursiveDecoding:
 
         lt = LogicalType(
             type="ROW",
-            children=[
+            fields=[
                 ColumnInfo(name="x", logical_type=LogicalType(type="INTEGER")),
             ],
         )
@@ -537,13 +533,11 @@ class TestRecursiveDecoding:
 
     def test_array_decodes_elements(self):
         """An ARRAY<INTEGER> should decode each element."""
-        from flink_gateway.models import ColumnInfo, LogicalType
+        from flink_gateway.models import LogicalType
 
         lt = LogicalType(
             type="ARRAY",
-            children=[
-                ColumnInfo(name="ELEMENT", logical_type=LogicalType(type="INTEGER")),
-            ],
+            element_type=LogicalType(type="INTEGER"),
         )
         ft = normalize_flink_type("ARRAY")
         result = decode_field(["1", "2", "3"], ft, logical_type=lt)
@@ -555,16 +549,14 @@ class TestRecursiveDecoding:
 
         row_lt = LogicalType(
             type="ROW",
-            children=[
+            fields=[
                 ColumnInfo(name="name", logical_type=LogicalType(type="VARCHAR")),
                 ColumnInfo(name="score", logical_type=LogicalType(type="INTEGER")),
             ],
         )
         lt = LogicalType(
             type="ARRAY",
-            children=[
-                ColumnInfo(name="ELEMENT", logical_type=row_lt),
-            ],
+            element_type=row_lt,
         )
         ft = normalize_flink_type("ARRAY")
         result = decode_field(
