@@ -342,7 +342,12 @@ def test_filesystem_row_complex_type(flink_gateway_url: str):
                     nested_map MAP<STRING, ROW<
                         ts TIMESTAMP(3)
                     >>
-                >> NOT NULL
+                >> NOT NULL,
+                price       DECIMAL(10, 2) NOT NULL,
+                birth_date  DATE NOT NULL,
+                start_time  TIME(0) NOT NULL,
+                created_at  TIMESTAMP(3) NOT NULL,
+                updated_ltz TIMESTAMP_LTZ(3) NOT NULL
             ) WITH (
                 'connector' = 'filesystem',
                 'format' = 'json',
@@ -375,7 +380,12 @@ def test_filesystem_row_complex_type(flink_gateway_url: str):
                              ROW(TIMESTAMP '2024-03-15 09:30:00.000')
                          ]
                      )
-                 ]
+                 ],
+                 CAST(99.95 AS DECIMAL(10, 2)),
+                 DATE '2024-06-15',
+                 TIME '14:30:00',
+                 TIMESTAMP '2024-06-15 14:30:00.123',
+                 TO_TIMESTAMP_LTZ(1718458200123, 3)
                 ),
                 (2, 'beta',
                  ROW(20, 'B'),
@@ -395,7 +405,12 @@ def test_filesystem_row_complex_type(flink_gateway_url: str):
                              ROW(TIMESTAMP '2025-07-04 18:45:00.000')
                          ]
                      )
-                 ]
+                 ],
+                 CAST(199.99 AS DECIMAL(10, 2)),
+                 DATE '2025-12-25',
+                 TIME '09:15:30',
+                 TIMESTAMP '2025-12-25 09:15:30.456',
+                 TO_TIMESTAMP_LTZ(1735117530456, 3)
                 )
         """,
         )
@@ -467,3 +482,34 @@ def test_filesystem_row_complex_type(flink_gateway_url: str):
     assert dm["env2"]["nested_map"]["svc3"]["ts"] == datetime.datetime(
         2025, 7, 4, 18, 45, 0
     )
+
+    # ── Type conversion assertions ────────────────────────────────
+    # Row 1
+    r = by_id[1]
+
+    # DECIMAL → Decimal
+    assert r[9] == Decimal("99.95")
+    assert isinstance(r[9], Decimal)
+
+    # DATE → datetime.date
+    assert r[10] == datetime.date(2024, 6, 15)
+    assert isinstance(r[10], datetime.date)
+
+    # TIME → datetime.time
+    assert r[11] == datetime.time(14, 30, 0)
+    assert isinstance(r[11], datetime.time)
+
+    # TIMESTAMP → datetime.datetime
+    assert r[12] == datetime.datetime(2024, 6, 15, 14, 30, 0, 123000)
+    assert isinstance(r[12], datetime.datetime)
+
+    # TIMESTAMP_LTZ → datetime.datetime
+    assert isinstance(r[13], datetime.datetime)
+
+    # Row 2
+    r = by_id[2]
+    assert r[9] == Decimal("199.99")
+    assert r[10] == datetime.date(2025, 12, 25)
+    assert r[11] == datetime.time(9, 15, 30)
+    assert r[12] == datetime.datetime(2025, 12, 25, 9, 15, 30, 456000)
+    assert isinstance(r[13], datetime.datetime)

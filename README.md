@@ -1,5 +1,9 @@
 # py-flink-sql-gateway
 
+[![CI](https://github.com/exness/py-flink-sql-gateway/actions/workflows/ci.yml/badge.svg)](https://github.com/exness/py-flink-sql-gateway/actions/workflows/ci.yml)
+[![PyPI version](https://img.shields.io/pypi/v/py-flink-sql-gateway)](https://pypi.org/project/py-flink-sql-gateway/)
+[![Python](https://img.shields.io/pypi/pyversions/py-flink-sql-gateway)](https://pypi.org/project/py-flink-sql-gateway/)
+
 A lightweight Python driver for the **Apache Flink SQL Gateway**, implementing [PEP 249 (DB-API 2.0)](https://peps.python.org/pep-0249/).
 
 ## Installation
@@ -61,6 +65,18 @@ with connect("http://localhost:8083") as conn:
 
 > **Tip:** `ROW` and `MAP` types arrive as Python `dict`, `ARRAY` arrives as `list`. Binary data is passed through as-is.
 
+### Connection options
+
+```python
+# Pass Flink session properties
+with connect("http://localhost:8083", properties={"pipeline.name": "my-job"}) as conn:
+    ...
+
+# Set a query timeout (default: 300s)
+with conn.cursor(query_timeout=60.0) as cur:
+    cur.execute("SELECT ...")
+```
+
 ### Low-level REST access
 
 If you need features beyond DB-API, use the exported client directly:
@@ -78,7 +94,7 @@ with FlinkSqlGatewayClient("http://localhost:8083") as client:
 Python uses `None` for SQL NULLs natively — no wrapper types needed.
 
 | Flink Type                | Python Type        |
-|---------------------------|--------------------|
+|---------------------------|:------------------:|
 | TINYINT / SMALLINT / INT  | `int`              |
 | BIGINT / INTERVAL         | `int`              |
 | FLOAT / DOUBLE            | `float`            |
@@ -93,21 +109,39 @@ Python uses `None` for SQL NULLs natively — no wrapper types needed.
 | MAP                       | `dict`             |
 | ARRAY                     | `list`             |
 
+Nested complex types (e.g. `MAP<STRING, ROW<..., MAP<STRING, ROW<TIMESTAMP>>>>`) are recursively decoded to the correct Python types.
+
+## Exceptions
+
+The driver follows the [PEP 249 exception hierarchy](https://peps.python.org/pep-0249/#exceptions):
+
+| Exception                | When raised                                      |
+|--------------------------|--------------------------------------------------|
+| `InterfaceError`         | Misuse of the driver (e.g. unsupported parameters)|
+| `OperationalError`       | Server-side or network errors                    |
+| `FlinkSqlGatewayError`   | Flink SQL Gateway specific errors (extends `OperationalError`) |
+
 ---
 
 ## Development & tests
 
-Requires Python 3.13+ and [uv](https://docs.astral.sh/uv/).
+Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 
 ```bash
 # Install dependencies
-uv sync
+uv sync --group dev
+
+# Set up pre-commit hooks (runs on every push)
+pre-commit install --hook-type pre-push
 
 # Run unit tests (no Docker needed)
 uv run pytest tests/test_client.py tests/test_dbapi.py -v
 
-# Run all tests including integration (requires Docker)
-uv run pytest tests/ -v
+# Run integration tests (requires Docker)
+uv run pytest tests/test_integration.py -v -s -m integration
+
+# Run all pre-commit checks manually
+pre-commit run --all-files
 ```
 
 Integration tests spin up a Flink cluster (JobManager + TaskManager + SQL Gateway) via [testcontainers-python](https://testcontainers-python.readthedocs.io/).
@@ -116,4 +150,4 @@ Integration tests spin up a Flink cluster (JobManager + TaskManager + SQL Gatewa
 
 ## License
 
-MIT (see LICENSE)
+MIT
