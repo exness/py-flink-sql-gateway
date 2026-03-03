@@ -111,16 +111,6 @@ Python uses `None` for SQL NULLs natively — no wrapper types needed.
 
 Nested complex types (e.g. `MAP<STRING, ROW<..., MAP<STRING, ROW<TIMESTAMP>>>>`) are recursively decoded to the correct Python types.
 
-## Exceptions
-
-The driver follows the [PEP 249 exception hierarchy](https://peps.python.org/pep-0249/#exceptions):
-
-| Exception                | When raised                                      |
-|--------------------------|--------------------------------------------------|
-| `InterfaceError`         | Misuse of the driver (e.g. unsupported parameters)|
-| `OperationalError`       | Server-side or network errors                    |
-| `FlinkSqlGatewayError`   | Flink SQL Gateway specific errors (extends `OperationalError`) |
-
 ---
 
 ## Development & tests
