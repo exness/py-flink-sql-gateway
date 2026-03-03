@@ -1,0 +1,311 @@
+"""PEP 249 Cursor implementation for the Flink SQL Gateway."""
+
+from __future__ import annotations
+
+import time
+from typing import TYPE_CHECKING, Any, Iterator, Sequence
+
+from flink_gateway.exceptions import InterfaceError, OperationalError, ProgrammingError
+from flink_gateway.models import (
+    ColumnInfo,
+    ExecuteStatementRequest,
+    FetchResultsResponse,
+    ResultKind,
+    ResultType,
+    RowData,
+)
+from flink_gateway.types import decode_field, normalize_flink_type, type_code_for
+
+if TYPE_CHECKING:
+    from flink_gateway.connection import Connection
+
+_POLL_INTERVAL = 1.0  # seconds
+_RESULTS_MIN_BACKOFF = 0.1  # seconds
+_RESULTS_MAX_BACKOFF = 1.0  # seconds
+_DEFAULT_QUERY_TIMEOUT = 300.0  # 5 minutes
+
+# PEP 249 description row: (name, type_code, display_size, internal_size,
+#                           precision, scale, null_ok)
+_DescriptionRow = tuple[str, str, None, None, int | None, int | None, bool | None]
+
+
+class Cursor:
+    """PEP 249 Cursor for executing Flink SQL statements.
+
+    Do not instantiate directly; use :meth:`Connection.cursor`.
+    """
+
+    arraysize: int = 1
+
+    def __init__(
+        self, connection: Connection, *, query_timeout: float = _DEFAULT_QUERY_TIMEOUT
+    ) -> None:
+        self._connection = connection
+        self._closed = False
+        self._description: list[_DescriptionRow] | None = None
+        self._rowcount = -1
+        self._operation_handle: str | None = None
+        self._rows_iterator: Iterator[tuple[Any, ...]] | None = None
+        self._columns: list[ColumnInfo] = []
+        self._query_timeout = query_timeout
+
+    # ── PEP 249 attributes ─────────────────────────────────────────
+
+    @property
+    def description(
+        self,
+    ) -> list[_DescriptionRow] | None:
+        """Column metadata for the last executed query.
+
+        Each entry is a 7-tuple:
+        ``(name, type_code, display_size, internal_size, precision, scale, null_ok)``
+        """
+        return self._description
+
+    @property
+    def rowcount(self) -> int:
+        """Number of rows affected.  Always ``-1`` for Flink."""
+        return self._rowcount
+
+    # ── Lifecycle ──────────────────────────────────────────────────
+
+    def close(self) -> None:
+        """Close the cursor and release the underlying operation."""
+        if not self._closed:
+            self._closed = True
+            self._rows_iterator = None
+            self._close_current_operation()
+
+    def __enter__(self) -> Cursor:
+        return self
+
+    def __exit__(self, *_: Any) -> None:
+        self.close()
+
+    def _check_open(self) -> None:
+        if self._closed:
+            raise ProgrammingError("cursor is closed")
+        if self._connection.closed:
+            raise ProgrammingError("connection is closed")
+
+    # ── Execution ──────────────────────────────────────────────────
+
+    def execute(
+        self, operation: str, parameters: Sequence[Any] | None = None
+    ) -> Cursor:
+        """Execute a SQL statement.
+
+        Args:
+            operation: The SQL string.
+            parameters: Not yet supported.
+
+        Returns:
+            self (for chaining).
+        """
+        self._check_open()
+
+        # Close any previous operation.
+        self._close_current_operation()
+
+        # Reset state.
+        self._description = None
+        self._rowcount = -1
+        self._rows_iterator = None
+        self._columns = []
+
+        if parameters is not None:
+            raise InterfaceError("parameterized queries are not yet supported")
+
+        client = self._connection.client
+        session = self._connection.session_handle
+
+        # Submit statement.
+        op_handle = client.execute_statement(
+            session,
+            ExecuteStatementRequest(statement=operation),
+        )
+        self._operation_handle = op_handle
+
+        # Poll until results are ready.
+        result = self._fetch_until_ready(op_handle)
+
+        # Build description from column metadata.
+        self._columns = result.results.columns
+        self._build_description()
+
+        # Set up the row iterator if this is a query.
+        if (
+            result.is_query_result
+            or result.result_kind == ResultKind.SUCCESS_WITH_CONTENT
+        ):
+            self._rows_iterator = self._iter_rows(
+                result.results.data,
+                result.next_token(),
+                op_handle,
+            )
+        else:
+            # Not a query — close the operation now.
+            self._close_current_operation()
+
+        return self
+
+    def executemany(
+        self,
+        operation: str,
+        seq_of_parameters: Sequence[Sequence[Any]],
+    ) -> None:
+        """Execute a statement multiple times with different parameters."""
+        self._check_open()
+        for params in seq_of_parameters:
+            self.execute(operation, params)
+
+    # ── Fetching ───────────────────────────────────────────────────
+
+    def fetchone(self) -> tuple[Any, ...] | None:
+        """Fetch the next row, or ``None`` if exhausted."""
+        self._check_open()
+        if self._rows_iterator is None:
+            raise ProgrammingError("no query executed")
+        try:
+            return next(self._rows_iterator)
+        except StopIteration:
+            return None
+
+    def fetchmany(self, size: int | None = None) -> list[tuple[Any, ...]]:
+        """Fetch up to *size* rows."""
+        self._check_open()
+        if self._rows_iterator is None:
+            raise ProgrammingError("no query executed")
+        if size is None:
+            size = self.arraysize
+        rows: list[tuple[Any, ...]] = []
+        for _ in range(size):
+            row = self.fetchone()
+            if row is None:
+                break
+            rows.append(row)
+        return rows
+
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        """Fetch all remaining rows."""
+        self._check_open()
+        if self._rows_iterator is None:
+            raise ProgrammingError("no query executed")
+        return list(self._rows_iterator)
+
+    def __iter__(self) -> Iterator[tuple[Any, ...]]:
+        return self
+
+    def __next__(self) -> tuple[Any, ...]:
+        row = self.fetchone()
+        if row is None:
+            raise StopIteration
+        return row
+
+    # ── Not supported ──────────────────────────────────────────────
+
+    def setinputsizes(self, sizes: Any) -> None:
+        """No-op (PEP 249 compliance)."""
+
+    def setoutputsize(self, size: Any, column: int = 0) -> None:
+        """No-op (PEP 249 compliance)."""
+
+    # ── Internal ───────────────────────────────────────────────────
+
+    def _close_current_operation(self) -> None:
+        """Close the current operation handle, ignoring errors."""
+        if self._operation_handle:
+            try:
+                self._connection.client.close_operation(
+                    self._connection.session_handle,
+                    self._operation_handle,
+                )
+            except Exception:
+                pass
+            self._operation_handle = None
+
+    def _fetch_until_ready(self, op_handle: str) -> FetchResultsResponse:
+        """Poll ``fetch_results`` until the result is no longer NOT_READY."""
+        client = self._connection.client
+        session = self._connection.session_handle
+        deadline = time.monotonic() + self._query_timeout
+        while True:
+            result = client.fetch_results(session, op_handle, "0", "json")
+            if result.result_type != ResultType.NOT_READY:
+                return result
+            if time.monotonic() > deadline:
+                raise OperationalError(
+                    f"query timed out after {self._query_timeout}s waiting for results"
+                )
+            time.sleep(_POLL_INTERVAL)
+
+    def _build_description(self) -> None:
+        """Populate ``self._description`` from ``self._columns``."""
+        if not self._columns:
+            self._description = None
+            return
+        desc: list[_DescriptionRow] = []
+        for col in self._columns:
+            ft = normalize_flink_type(col.logical_type.type)
+            tc = type_code_for(ft)
+            desc.append(
+                (
+                    col.name,
+                    tc,
+                    None,  # display_size
+                    None,  # internal_size
+                    col.logical_type.precision,
+                    col.logical_type.scale,
+                    col.logical_type.nullable,
+                )
+            )
+        self._description = desc
+
+    def _iter_rows(
+        self,
+        initial_data: list[RowData],
+        next_token: str,
+        op_handle: str,
+    ) -> Iterator[tuple[Any, ...]]:
+        """Yield decoded row tuples, fetching pages as needed."""
+        client = self._connection.client
+        session = self._connection.session_handle
+
+        data = initial_data
+        token = next_token
+        pos = 0
+        backoff = _RESULTS_MIN_BACKOFF
+
+        while True:
+            if pos < len(data):
+                row = data[pos]
+                pos += 1
+                yield self._decode_row(row)
+                continue
+
+            # Fetch next page.
+            response = client.fetch_results(session, op_handle, token, "")
+            if response.result_type == ResultType.EOS:
+                return
+
+            data = response.results.data
+            token = response.next_token()
+            pos = 0
+
+            if not data:
+                time.sleep(backoff)
+                if backoff < _RESULTS_MAX_BACKOFF:
+                    backoff = min(backoff * 2, _RESULTS_MAX_BACKOFF)
+            else:
+                backoff = _RESULTS_MIN_BACKOFF
+
+    def _decode_row(self, row: RowData) -> tuple[Any, ...]:
+        """Decode a single RowData into a Python tuple."""
+        values: list[Any] = []
+        for i, raw in enumerate(row.fields):
+            col = self._columns[i]
+            ft = normalize_flink_type(col.logical_type.type)
+            values.append(
+                decode_field(raw, ft, col.logical_type.precision, col.logical_type)
+            )
+        return tuple(values)

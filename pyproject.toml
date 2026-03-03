@@ -1,0 +1,40 @@
+[project]
+name = "py-flink-sql-gateway"
+version = "0.1.0"
+description = "A Python client for the Apache Flink SQL Gateway REST API"
+readme = "README.md"
+authors = [
+    { name = "Ilya Soin", email = "ilya.soin@exness.com" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.28.1",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "testcontainers>=4.14.1",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/flink_gateway"]
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: end-to-end tests requiring Docker (Flink cluster)",
+]
+
+[tool.isort]
+profile = "black"
+line_length = 88
+
+[tool.ruff]
+line-length = 88
+
+[tool.ruff.per-file-ignores]
+"__init__.py" = ["E402"]
