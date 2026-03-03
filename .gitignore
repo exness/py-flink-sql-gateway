@@ -9,3 +9,6 @@ wheels/
 # Virtual environments
 .venv
 .idea
+
+# Auto-generated version file
+src/flink_gateway/_version.py
