@@ -331,7 +331,7 @@ def test_filesystem_row_complex_type(flink_gateway_url: str):
                 id          BIGINT NOT NULL,
                 name        STRING NOT NULL,
                 info        ROW<score INT, label STRING> NOT NULL,
-                nested_row  ROW<outer_val INT, inner ROW<x DOUBLE, y DOUBLE>> NOT NULL,
+                nested_row  ROW<outer_val INT, inner_row ROW<x DOUBLE, y DOUBLE>> NOT NULL,
                 tags        MAP<STRING, INT> NOT NULL,
                 player_map  MAP<STRING, ROW<score INT, level STRING>> NOT NULL,
                 ts_array    ARRAY<TIMESTAMP(3)> NOT NULL,
@@ -388,8 +388,8 @@ def test_filesystem_row_complex_type(flink_gateway_url: str):
 
     # Nested ROW-in-ROW: inner values decoded to float
     assert r[3]["outer_val"] == 1
-    assert r[3]["inner"]["x"] == 1.5
-    assert r[3]["inner"]["y"] == 2.5
+    assert r[3]["inner_row"]["x"] == 1.5
+    assert r[3]["inner_row"]["y"] == 2.5
 
     # MAP<STRING, INT>
     assert r[4] == {"a": 1, "b": 2}
@@ -412,7 +412,7 @@ def test_filesystem_row_complex_type(flink_gateway_url: str):
     r = by_id[2]
     assert r[1] == "beta"
     assert r[2] == {"score": 20, "label": "B"}
-    assert r[3]["inner"]["x"] == 3.0
+    assert r[3]["inner_row"]["x"] == 3.0
     assert r[4] == {"c": 3}
     assert r[5]["p2"]["score"] == 200
     assert r[5]["p3"]["level"] == "bronze"
