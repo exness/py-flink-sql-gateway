@@ -98,8 +98,6 @@ def test_select_all_types_not_null(flink_gateway_url: str):
             cur.execute("SELECT * FROM test_types_nn")
             row = cur.fetchone()
 
-        print(row)
-
         assert row is not None, "Expected at least one row from datagen"
 
         # Validate Python types
@@ -420,59 +418,3 @@ def test_filesystem_row_complex_type(flink_gateway_url: str):
     assert r[5]["p3"]["level"] == "bronze"
     assert r[6][0] == datetime.datetime(2025, 12, 25, 0, 0, 0)
     assert r[7][0] == {"name": "z", "value": 30}
-
-
-@pytest.mark.integration
-def test_qqq(flink_gateway_url: str):
-    from flink_gateway import connect
-
-    with connect(flink_gateway_url) as conn:
-        # Create a streaming source
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                        CREATE TABLE orders
-                        (
-                            id         INT          NOT NULL,
-                            item       STRING       NOT NULL,
-                            created_at TIMESTAMP(6) NOT NULL,
-                            customer   ROW<
-                        first_name STRING NOT NULL,
-                            last_name  STRING       NOT NULL,
-                            age        INT          NOT NULL > NOT NULL,
-                            notes      STRING
-                        ) WITH (
-                              'connector' = 'datagen',
-                              'rows-per-second' = '5',
-                              'fields.id.kind' = 'sequence',
-                              'fields.id.start' = '1',
-                              'fields.id.end' = '100',
-                              'fields.item.length' = '12',
-                              'fields.customer.first_name.length' = '8',
-                              'fields.customer.last_name.length' = '10',
-                              'fields.customer.age.min' = '21',
-                              'fields.customer.age.max' = '65',
-                              'fields.notes.length' = '12'
-                              )
-                        """
-            )
-
-        # Query and iterate
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                        SELECT id, item, created_at, customer, notes AS note
-                        FROM orders
-                        """
-            )
-            for i, row in enumerate(cur):
-                id_, item, created_at, customer, note = row
-                print(
-                    f"{id_}\t{item}\t{created_at.isoformat()}\t"
-                    f"{customer['first_name']} "
-                    f"{customer['last_name']} "
-                    f"({customer['age']})\t"
-                    f"{note or ''}"
-                )
-                if i >= 4:
-                    break
