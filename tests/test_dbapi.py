@@ -640,7 +640,9 @@ class TestConnectFunction:
             conn = connect("http://localhost:8083", properties={"key": "val"})
 
             MockClient.assert_called_once_with(
-                "http://localhost:8083", api_version="v3"
+                "http://localhost:8083",
+                http_client=None,
+                api_version="v3",
             )
             mock_instance.open_session.assert_called_once()
             assert conn.session_handle == "sess-new"

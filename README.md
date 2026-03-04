@@ -72,6 +72,12 @@ with connect("http://localhost:8083") as conn:
 with connect("http://localhost:8083", properties={"pipeline.name": "my-job"}) as conn:
     ...
 
+# Provide a custom HTTP client (e.g. for SSL, auth, proxies)
+import httpx
+client = httpx.Client(verify="/path/to/ca.crt", timeout=60.0)
+with connect("https://localhost:8083", http_client=client) as conn:
+    ...
+
 # Set a query timeout (default: 300s)
 with conn.cursor(query_timeout=60.0) as cur:
     cur.execute("SELECT ...")

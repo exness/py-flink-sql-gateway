@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import httpx
+
 from flink_gateway.client import FlinkSqlGatewayClient
 from flink_gateway.cursor import Cursor
 from flink_gateway.exceptions import NotSupportedError, ProgrammingError
@@ -85,6 +87,7 @@ def connect(
     *,
     properties: dict[str, str] | None = None,
     api_version: str = "v3",
+    http_client: httpx.Client | None = None,
 ) -> Connection:
     """Open a connection to a Flink SQL Gateway.
 
@@ -94,11 +97,15 @@ def connect(
         url: Gateway URL, e.g. ``"http://localhost:8083"``.
         properties: Optional session properties.
         api_version: REST API version (default ``"v3"``).
+        http_client: Optional pre-configured :class:`httpx.Client`
+            for custom SSL, timeouts, authentication, etc.
 
     Returns:
         A :class:`Connection` instance.
     """
-    client = FlinkSqlGatewayClient(url, api_version=api_version)
+    client = FlinkSqlGatewayClient(
+        url, http_client=http_client, api_version=api_version
+    )
     try:
         session_handle = client.open_session(
             OpenSessionRequest(properties=properties) if properties else None
