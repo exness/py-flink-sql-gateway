@@ -224,7 +224,7 @@ def decode_field(
         value: The raw JSON value from the gateway response.
         flink_type: The normalized Flink type.
         precision: Optional precision from column metadata.
-        logical_type: Optional full ``LogicalType`` with children for
+        logical_type: Optional full ``LogicalType`` with element_type/fields for
             recursive decoding of ROW / MAP types.
 
     Returns:
@@ -314,18 +314,22 @@ def _decode_array_value(
     value: Any,
     logical_type: LogicalType | None,
 ) -> Any:
-    """Decode an ARRAY value using its element child schema."""
-    if not isinstance(value, list) or logical_type is None or not logical_type.children:
+    """Decode an ARRAY value using its element type schema."""
+    if (
+        not isinstance(value, list)
+        or logical_type is None
+        or logical_type.element_type is None
+    ):
         return value
 
-    elem_child = logical_type.children[0]
-    elem_ft = normalize_flink_type(elem_child.logical_type.type)
+    elem_lt = logical_type.element_type
+    elem_ft = normalize_flink_type(elem_lt.type)
     return [
         decode_field(
             item,
             elem_ft,
-            precision=elem_child.logical_type.precision,
-            logical_type=elem_child.logical_type,
+            precision=elem_lt.precision,
+            logical_type=elem_lt,
         )
         for item in value
     ]
@@ -335,21 +339,21 @@ def _decode_row_value(
     value: Any,
     logical_type: LogicalType | None,
 ) -> Any:
-    """Decode a ROW value using its child schema."""
-    if not isinstance(value, dict) or logical_type is None or not logical_type.children:
+    """Decode a ROW value using its field schema."""
+    if not isinstance(value, dict) or logical_type is None or not logical_type.fields:
         return value
 
-    children_by_name = {child.name: child for child in logical_type.children}
+    fields_by_name = {f.name: f for f in logical_type.fields}
     decoded: dict[str, Any] = {}
     for key, raw_val in value.items():
-        child = children_by_name.get(key)
-        if child is not None:
-            child_ft = normalize_flink_type(child.logical_type.type)
+        fld = fields_by_name.get(key)
+        if fld is not None:
+            fld_ft = normalize_flink_type(fld.logical_type.type)
             decoded[key] = decode_field(
                 raw_val,
-                child_ft,
-                precision=child.logical_type.precision,
-                logical_type=child.logical_type,
+                fld_ft,
+                precision=fld.logical_type.precision,
+                logical_type=fld.logical_type,
             )
         else:
             decoded[key] = raw_val
@@ -360,32 +364,33 @@ def _decode_map_value(
     value: Any,
     logical_type: LogicalType | None,
 ) -> Any:
-    """Decode a MAP value using its key/value child schemas."""
+    """Decode a MAP value using its key/value type schemas."""
     if (
         not isinstance(value, dict)
         or logical_type is None
-        or len(logical_type.children) < 2
+        or logical_type.key_type is None
+        or logical_type.value_type is None
     ):
         return value
 
-    key_child = logical_type.children[0]
-    val_child = logical_type.children[1]
-    key_ft = normalize_flink_type(key_child.logical_type.type)
-    val_ft = normalize_flink_type(val_child.logical_type.type)
+    key_lt = logical_type.key_type
+    val_lt = logical_type.value_type
+    key_ft = normalize_flink_type(key_lt.type)
+    val_ft = normalize_flink_type(val_lt.type)
 
     decoded: dict[Any, Any] = {}
     for raw_key, raw_val in value.items():
         dk = decode_field(
             raw_key,
             key_ft,
-            precision=key_child.logical_type.precision,
-            logical_type=key_child.logical_type,
+            precision=key_lt.precision,
+            logical_type=key_lt,
         )
         dv = decode_field(
             raw_val,
             val_ft,
-            precision=val_child.logical_type.precision,
-            logical_type=val_child.logical_type,
+            precision=val_lt.precision,
+            logical_type=val_lt,
         )
         decoded[dk] = dv
     return decoded

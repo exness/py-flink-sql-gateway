@@ -112,12 +112,36 @@ class LogicalType:
     precision: int | None = None
     scale: int | None = None
     resolution: str | None = None
-    children: list[ColumnInfo] = field(default_factory=list)
+    # ARRAY element type
+    element_type: LogicalType | None = None
+    # MAP key/value types
+    key_type: LogicalType | None = None
+    value_type: LogicalType | None = None
+    # ROW field descriptors
+    fields: list[ColumnInfo] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> LogicalType:
-        children_raw = data.get("children", [])
-        children = [ColumnInfo.from_dict(c) for c in children_raw]
+        element_type = None
+        key_type = None
+        value_type = None
+        fields: list[ColumnInfo] = []
+
+        if "elementType" in data:
+            element_type = LogicalType.from_dict(data["elementType"])
+        if "keyType" in data:
+            key_type = LogicalType.from_dict(data["keyType"])
+        if "valueType" in data:
+            value_type = LogicalType.from_dict(data["valueType"])
+        if "fields" in data:
+            for f in data["fields"]:
+                fields.append(
+                    ColumnInfo(
+                        name=f.get("name", ""),
+                        logical_type=LogicalType.from_dict(f.get("fieldType", {})),
+                    )
+                )
+
         return cls(
             type=data.get("type", ""),
             nullable=data.get("nullable", True),
@@ -125,7 +149,10 @@ class LogicalType:
             precision=data.get("precision"),
             scale=data.get("scale"),
             resolution=data.get("resolution"),
-            children=children,
+            element_type=element_type,
+            key_type=key_type,
+            value_type=value_type,
+            fields=fields,
         )
 
 

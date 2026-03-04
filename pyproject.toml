@@ -1,12 +1,18 @@
 [project]
 name = "py-flink-sql-gateway"
-version = "0.1.0"
-description = "A Python client for the Apache Flink SQL Gateway REST API"
+dynamic = ["version"]
+description = "A lightweight Python driver for the Apache Flink SQL Gateway, implementing PEP 249 (DB-API 2.0)."
 readme = "README.md"
 authors = [
     { name = "Ilya Soin", email = "ilya.soin@exness.com" }
 ]
 requires-python = ">=3.11"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
 dependencies = [
     "httpx>=0.28.1",
 ]
@@ -18,8 +24,15 @@ dev = [
 ]
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
+
+[tool.hatch.version]
+source = "vcs"
+raw-options = { version_scheme = "guess-next-dev" }
+
+[tool.hatch.build.hooks.vcs]
+version-file = "src/flink_gateway/_version.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/flink_gateway"]

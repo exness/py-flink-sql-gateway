@@ -98,8 +98,6 @@ def test_select_all_types_not_null(flink_gateway_url: str):
             cur.execute("SELECT * FROM test_types_nn")
             row = cur.fetchone()
 
-        print(row)
-
         assert row is not None, "Expected at least one row from datagen"
 
         # Validate Python types
@@ -333,11 +331,23 @@ def test_filesystem_row_complex_type(flink_gateway_url: str):
                 id          BIGINT NOT NULL,
                 name        STRING NOT NULL,
                 info        ROW<score INT, label STRING> NOT NULL,
-                nested_row  ROW<outer_val INT, inner ROW<x DOUBLE, y DOUBLE>> NOT NULL,
+                nested_row  ROW<outer_val INT,
+                            inner_row ROW<x DOUBLE, y DOUBLE>> NOT NULL,
                 tags        MAP<STRING, INT> NOT NULL,
                 player_map  MAP<STRING, ROW<score INT, level STRING>> NOT NULL,
                 ts_array    ARRAY<TIMESTAMP(3)> NOT NULL,
-                row_array   ARRAY<ROW<name STRING, value INT>> NOT NULL
+                row_array   ARRAY<ROW<name STRING, val INT>> NOT NULL,
+                deep_map    MAP<STRING, ROW<
+                    label STRING,
+                    nested_map MAP<STRING, ROW<
+                        ts TIMESTAMP(3)
+                    >>
+                >> NOT NULL,
+                price       DECIMAL(10, 2) NOT NULL,
+                birth_date  DATE NOT NULL,
+                start_time  TIME(0) NOT NULL,
+                created_at  TIMESTAMP(3) NOT NULL,
+                updated_ltz TIMESTAMP_LTZ(3) NOT NULL
             ) WITH (
                 'connector' = 'filesystem',
                 'format' = 'json',
@@ -360,7 +370,22 @@ def test_filesystem_row_complex_type(flink_gateway_url: str):
                      TIMESTAMP '2024-01-01 10:00:00.000',
                      TIMESTAMP '2024-06-15 14:30:00.000'
                  ],
-                 ARRAY[ROW('x', 10), ROW('y', 20)]
+                 ARRAY[ROW('x', 10), ROW('y', 20)],
+                 MAP[
+                     'env1',
+                     ROW(
+                         'prod',
+                         MAP[
+                             'svc1',
+                             ROW(TIMESTAMP '2024-03-15 09:30:00.000')
+                         ]
+                     )
+                 ],
+                 CAST(99.95 AS DECIMAL(10, 2)),
+                 DATE '2024-06-15',
+                 TIME '14:30:00',
+                 TIMESTAMP '2024-06-15 14:30:00.123',
+                 TO_TIMESTAMP_LTZ(1718458200123, 3)
                 ),
                 (2, 'beta',
                  ROW(20, 'B'),
@@ -368,7 +393,24 @@ def test_filesystem_row_complex_type(flink_gateway_url: str):
                  MAP['c', 3],
                  MAP['p2', ROW(200, 'silver'), 'p3', ROW(300, 'bronze')],
                  ARRAY[TIMESTAMP '2025-12-25 00:00:00.000'],
-                 ARRAY[ROW('z', 30)]
+                 ARRAY[ROW('z', 30)],
+                 MAP[
+                     'env2',
+                     ROW(
+                         'staging',
+                         MAP[
+                             'svc2',
+                             ROW(TIMESTAMP '2025-06-01 12:00:00.000'),
+                             'svc3',
+                             ROW(TIMESTAMP '2025-07-04 18:45:00.000')
+                         ]
+                     )
+                 ],
+                 CAST(199.99 AS DECIMAL(10, 2)),
+                 DATE '2025-12-25',
+                 TIME '09:15:30',
+                 TIMESTAMP '2025-12-25 09:15:30.456',
+                 TO_TIMESTAMP_LTZ(1735117530456, 3)
                 )
         """,
         )
@@ -390,8 +432,8 @@ def test_filesystem_row_complex_type(flink_gateway_url: str):
 
     # Nested ROW-in-ROW: inner values decoded to float
     assert r[3]["outer_val"] == 1
-    assert r[3]["inner"]["x"] == 1.5
-    assert r[3]["inner"]["y"] == 2.5
+    assert r[3]["inner_row"]["x"] == 1.5
+    assert r[3]["inner_row"]["y"] == 2.5
 
     # MAP<STRING, INT>
     assert r[4] == {"a": 1, "b": 2}
@@ -404,75 +446,70 @@ def test_filesystem_row_complex_type(flink_gateway_url: str):
     assert r[6][0] == datetime.datetime(2024, 1, 1, 10, 0, 0)
     assert r[6][1] == datetime.datetime(2024, 6, 15, 14, 30, 0)
 
-    # ARRAY<ROW<name STRING, value INT>>
+    # ARRAY<ROW<name STRING, val INT>>
     arr = r[7]
     assert len(arr) == 2
-    assert arr[0] == {"name": "x", "value": 10}
-    assert arr[1] == {"name": "y", "value": 20}
+    assert arr[0] == {"name": "x", "val": 10}
+    assert arr[1] == {"name": "y", "val": 20}
 
     # ── Row 2 ──────────────────────────────────────────────────────
     r = by_id[2]
     assert r[1] == "beta"
     assert r[2] == {"score": 20, "label": "B"}
-    assert r[3]["inner"]["x"] == 3.0
+    assert r[3]["inner_row"]["x"] == 3.0
     assert r[4] == {"c": 3}
     assert r[5]["p2"]["score"] == 200
     assert r[5]["p3"]["level"] == "bronze"
     assert r[6][0] == datetime.datetime(2025, 12, 25, 0, 0, 0)
-    assert r[7][0] == {"name": "z", "value": 30}
+    assert r[7][0] == {"name": "z", "val": 30}
 
+    # ── deep_map assertions ────────────────────────────────────────
+    # Row 1
+    r = by_id[1]
+    dm = r[8]
+    assert dm["env1"]["label"] == "prod"
+    assert dm["env1"]["nested_map"]["svc1"]["ts"] == datetime.datetime(
+        2024, 3, 15, 9, 30, 0
+    )
 
-@pytest.mark.integration
-def test_qqq(flink_gateway_url: str):
-    from flink_gateway import connect
+    # Row 2
+    r = by_id[2]
+    dm = r[8]
+    assert dm["env2"]["label"] == "staging"
+    assert dm["env2"]["nested_map"]["svc2"]["ts"] == datetime.datetime(
+        2025, 6, 1, 12, 0, 0
+    )
+    assert dm["env2"]["nested_map"]["svc3"]["ts"] == datetime.datetime(
+        2025, 7, 4, 18, 45, 0
+    )
 
-    with connect(flink_gateway_url) as conn:
-        # Create a streaming source
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                        CREATE TABLE orders
-                        (
-                            id         INT          NOT NULL,
-                            item       STRING       NOT NULL,
-                            created_at TIMESTAMP(6) NOT NULL,
-                            customer   ROW<
-                        first_name STRING NOT NULL,
-                            last_name  STRING       NOT NULL,
-                            age        INT          NOT NULL > NOT NULL,
-                            notes      STRING
-                        ) WITH (
-                              'connector' = 'datagen',
-                              'rows-per-second' = '5',
-                              'fields.id.kind' = 'sequence',
-                              'fields.id.start' = '1',
-                              'fields.id.end' = '100',
-                              'fields.item.length' = '12',
-                              'fields.customer.first_name.length' = '8',
-                              'fields.customer.last_name.length' = '10',
-                              'fields.customer.age.min' = '21',
-                              'fields.customer.age.max' = '65',
-                              'fields.notes.length' = '12'
-                              )
-                        """
-            )
+    # ── Type conversion assertions ────────────────────────────────
+    # Row 1
+    r = by_id[1]
 
-        # Query and iterate
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                        SELECT id, item, created_at, customer, notes AS note
-                        FROM orders
-                        """
-            )
-            for i, row in enumerate(cur):
-                id_, item, created_at, customer, note = row
-                print(
-                    f"{id_}\t{item}\t{created_at.isoformat()}\t"
-                    f"{customer['first_name']} "
-                    f"{customer['last_name']} "
-                    f"({customer['age']})\t"
-                    f"{note or ''}"
-                )
-                if i >= 4:
-                    break
+    # DECIMAL → Decimal
+    assert r[9] == Decimal("99.95")
+    assert isinstance(r[9], Decimal)
+
+    # DATE → datetime.date
+    assert r[10] == datetime.date(2024, 6, 15)
+    assert isinstance(r[10], datetime.date)
+
+    # TIME → datetime.time
+    assert r[11] == datetime.time(14, 30, 0)
+    assert isinstance(r[11], datetime.time)
+
+    # TIMESTAMP → datetime.datetime
+    assert r[12] == datetime.datetime(2024, 6, 15, 14, 30, 0, 123000)
+    assert isinstance(r[12], datetime.datetime)
+
+    # TIMESTAMP_LTZ → datetime.datetime
+    assert isinstance(r[13], datetime.datetime)
+
+    # Row 2
+    r = by_id[2]
+    assert r[9] == Decimal("199.99")
+    assert r[10] == datetime.date(2025, 12, 25)
+    assert r[11] == datetime.time(9, 15, 30)
+    assert r[12] == datetime.datetime(2025, 12, 25, 9, 15, 30, 456000)
+    assert isinstance(r[13], datetime.datetime)
