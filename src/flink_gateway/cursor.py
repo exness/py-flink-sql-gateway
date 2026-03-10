@@ -284,6 +284,8 @@ class Cursor:
                 continue
 
             # Fetch next page.
+            if not token:
+                return
             response = client.fetch_results(session, op_handle, token, "")
             if response.result_type == ResultType.EOS:
                 return
