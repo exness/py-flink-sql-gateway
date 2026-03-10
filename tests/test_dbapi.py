@@ -292,6 +292,37 @@ class TestCursorExecuteFetch:
         rows = cur.fetchall()
         assert rows == [(1,), (2,), (3,), (4,)]
 
+    def test_single_page_eos_no_extra_fetch(self):
+        client = _mock_client()
+        cols = _columns(("id", "INTEGER", False))
+        client.execute_statement.return_value = "op-1"
+        client.fetch_results.side_effect = [
+            FetchResultsResponse(
+                result_type=ResultType.EOS,
+                result_kind=ResultKind.SUCCESS_WITH_CONTENT,
+                is_query_result=True,
+                next_result_uri="",
+                results=ResultSet(
+                    columns=cols,
+                    data=[
+                        RowData(kind="INSERT", fields=[1]),
+                        RowData(kind="INSERT", fields=[2]),
+                    ],
+                ),
+            ),
+            RuntimeError(
+                "fetch_results called with empty token — would be 404 on server"
+            ),
+        ]
+
+        conn = _make_connection(client)
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM t")
+        rows = list(cur)
+
+        assert rows == [(1,), (2,)]
+        assert client.fetch_results.call_count == 1
+
     def test_exec_non_query(self):
         """Non-query statements should not produce rows."""
         client = _mock_client()
