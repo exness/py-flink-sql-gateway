@@ -14,6 +14,7 @@ from flink_gateway.exceptions import (
     NotSupportedError,
     OperationalError,
     ProgrammingError,
+    TimeoutError,
 )
 from flink_gateway.models import (
     ColumnInfo,
@@ -65,6 +66,7 @@ __all__ = [
     "InterfaceError",
     "DatabaseError",
     "OperationalError",
+    "TimeoutError",
     "FlinkSqlGatewayError",
     "ProgrammingError",
     "NotSupportedError",

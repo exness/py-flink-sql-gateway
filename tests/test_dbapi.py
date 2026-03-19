@@ -15,6 +15,7 @@ import pytest
 import flink_gateway
 from flink_gateway import Connection, Cursor, NotSupportedError, ProgrammingError
 from flink_gateway.connection import connect
+from flink_gateway.exceptions import TimeoutError
 from flink_gateway.models import (
     ColumnInfo,
     FetchResultsResponse,
@@ -44,10 +45,21 @@ def _mock_client() -> MagicMock:
     return client
 
 
-def _make_connection(client: MagicMock | None = None) -> Connection:
+def _make_connection(
+    client: MagicMock | None = None,
+    *,
+    query_timeout: float | None = None,
+    idle_timeout: float | None = None,
+) -> Connection:
     """Create a Connection backed by a mock client."""
     c = client or _mock_client()
-    return Connection(c, "test-session", _owns_client=False)
+    return Connection(
+        c,
+        "test-session",
+        query_timeout=query_timeout,
+        idle_timeout=idle_timeout,
+        _owns_client=False,
+    )
 
 
 def _columns(*specs: tuple[str, str, bool]) -> list[ColumnInfo]:
@@ -689,3 +701,189 @@ class TestConnectFunction:
                 connect("http://localhost:8083")
 
             mock_instance.close.assert_called_once()
+
+
+# ── Streaming timeouts ─────────────────────────────────────────────────
+def _empty_payload(cols, next_uri: str) -> FetchResultsResponse:
+    """An empty PAYLOAD page with a pagination token (server has no rows yet)."""
+    return FetchResultsResponse(
+        result_type=ResultType.PAYLOAD,
+        next_result_uri=next_uri,
+        results=ResultSet(columns=cols, data=[]),
+    )
+
+
+class TestStreamingTimeouts:
+    """Tests for query_timeout and idle_timeout on connect().
+    All tests mock time.monotonic and time.sleep to avoid real waits.
+    """
+
+    def test_query_timeout_fires_during_empty_pages(self):
+        """query_timeout raises TimeoutError when empty pages keep arriving."""
+        client = _mock_client()
+        cols = _columns(("id", "INTEGER", False))
+        client.execute_statement.return_value = "op-1"
+        # Initial page has data + token; subsequent pages are empty but keep token
+        # so iteration continues until the timeout fires.
+        client.fetch_results.side_effect = [
+            _ready_result(cols, [[1]], next_uri="/v3/.../result/1"),
+            _empty_payload(cols, "/v3/.../result/2"),
+            _empty_payload(cols, "/v3/.../result/3"),
+            _empty_payload(cols, "/v3/.../result/4"),
+        ]
+
+        # Monotonic call map (query_timeout=1.0, no idle_timeout):
+        #   0.0 → execute(): _query_deadline = 1.0
+        #   0.0 → post-yield check after row 1       (ok)
+        #   0.5 → empty-page 1 timeout check         (ok, sleep capped to 0.5)
+        #   0.5 → empty-page 2 timeout check         (ok)
+        #   1.5 → empty-page 3 timeout check         → RAISE
+        monotonic_seq = iter([0.0, 0.0, 0.5, 0.5, 1.5])
+
+        conn = _make_connection(client, query_timeout=1.0)
+        cur = conn.cursor()
+        with (
+            patch("flink_gateway.cursor.time.sleep"),
+            patch("flink_gateway.cursor.time.monotonic", side_effect=monotonic_seq),
+        ):
+            cur.execute("SELECT id FROM t")
+            with pytest.raises(TimeoutError, match="query_timeout"):
+                cur.fetchall()
+
+    def test_idle_timeout_fires_during_empty_pages(self):
+        """idle_timeout raises TimeoutError when no rows arrive for too long."""
+        client = _mock_client()
+        cols = _columns(("id", "INTEGER", False))
+        client.execute_statement.return_value = "op-1"
+        client.fetch_results.side_effect = [
+            _ready_result(cols, [[1]], next_uri="/v3/.../result/1"),
+            _empty_payload(cols, "/v3/.../result/2"),
+            _empty_payload(cols, "/v3/.../result/3"),
+        ]
+
+        # Monotonic call map (idle_timeout=5.0, no query_timeout):
+        #   0.0 → _iter_rows: idle_deadline = 5.0
+        #   0.0 → post-yield row 1    → ok
+        #   2.0 → empty-page 1 check  → 2.0 < 5.0 → ok
+        #   6.0 → empty-page 2 check  → 6.0 >= 5.0 → RAISE
+        monotonic_seq = iter([0.0, 0.0, 2.0, 6.0])
+
+        conn = _make_connection(client, idle_timeout=5.0)
+        cur = conn.cursor()
+        with (
+            patch("flink_gateway.cursor.time.sleep"),
+            patch("flink_gateway.cursor.time.monotonic", side_effect=monotonic_seq),
+        ):
+            cur.execute("SELECT id FROM t")
+            with pytest.raises(TimeoutError, match="idle_timeout"):
+                cur.fetchall()
+
+    def test_idle_deadline_resets_on_new_data(self):
+        """idle_deadline resets each time a non-empty page arrives; no timeout
+        raised."""
+        client = _mock_client()
+        cols = _columns(("id", "INTEGER", False))
+        client.execute_statement.return_value = "op-1"
+        client.fetch_results.side_effect = [
+            _ready_result(cols, [[1]], next_uri="/v3/.../result/1"),
+            _empty_payload(cols, "/v3/.../result/2"),
+            _ready_result(
+                cols, [[2]], next_uri="/v3/.../result/3"
+            ),  # new data → reset idle
+            _eos_result(),
+        ]
+
+        # Monotonic call map (idle_timeout=5.0, no query_timeout):
+        #   0.0 → _iter_rows: idle_deadline = 5.0
+        #   0.0 → post-yield row 1    → ok
+        #   1.0 → empty-page check    → 1.0 < 5.0 → ok
+        #   2.0 → non-empty page      → idle_deadline reset to 7.0
+        #   2.0 → post-yield row 2    → ok
+        monotonic_seq = iter([0.0, 0.0, 1.0, 2.0, 2.0])
+
+        conn = _make_connection(client, idle_timeout=5.0)
+        cur = conn.cursor()
+        with (
+            patch("flink_gateway.cursor.time.sleep"),
+            patch("flink_gateway.cursor.time.monotonic", side_effect=monotonic_seq),
+        ):
+            cur.execute("SELECT id FROM t")
+            rows = cur.fetchall()
+
+        assert rows == [(1,), (2,)]
+
+    def test_query_timeout_fires_while_yielding_rows(self):
+        """query_timeout fires even when rows are arriving continuously."""
+        client = _mock_client()
+        cols = _columns(("id", "INTEGER", False))
+        client.execute_statement.return_value = "op-1"
+        client.fetch_results.side_effect = [
+            _ready_result(cols, [[1], [2], [3]], next_uri="/v3/.../result/1"),
+            _ready_result(cols, [[4], [5]], next_uri="/v3/.../result/2"),
+        ]
+
+        # Monotonic call map (query_timeout=2.0, no idle_timeout):
+        #   0.0 → execute(): _query_deadline = 2.0
+        #   0.5 → post-yield row 1  → ok
+        #   1.0 → post-yield row 2  → ok
+        #   2.5 → post-yield row 3  → >= 2.0 → RAISE
+        monotonic_seq = iter([0.0, 0.5, 1.0, 2.5])
+
+        conn = _make_connection(client, query_timeout=2.0)
+        cur = conn.cursor()
+        with (
+            patch("flink_gateway.cursor.time.sleep"),
+            patch("flink_gateway.cursor.time.monotonic", side_effect=monotonic_seq),
+        ):
+            cur.execute("SELECT id FROM t")
+            with pytest.raises(TimeoutError, match="query_timeout"):
+                cur.fetchall()
+
+    def test_sleep_is_capped_to_nearest_deadline(self):
+        """time.sleep is capped so it does not overshoot the idle deadline."""
+        client = _mock_client()
+        cols = _columns(("id", "INTEGER", False))
+        client.execute_statement.return_value = "op-1"
+        client.fetch_results.side_effect = [
+            _ready_result(cols, [[1]], next_uri="/v3/.../result/1"),
+            _empty_payload(cols, "/v3/.../result/2"),
+            _empty_payload(cols, "/v3/.../result/3"),
+        ]
+
+        # Monotonic call map (idle_timeout=0.3, no query_timeout):
+        #   0.0  → _iter_rows: idle_deadline = 0.3
+        #   0.0  → post-yield row 1   → ok
+        #   0.25 → empty-page 1: idle remaining = 0.05; backoff=0.1 → sleep(0.05)
+        #   0.35 → empty-page 2: 0.35 >= 0.3 → RAISE
+        monotonic_seq = iter([0.0, 0.0, 0.25, 0.35])
+
+        conn = _make_connection(client, idle_timeout=0.3)
+        cur = conn.cursor()
+        sleep_calls: list[float] = []
+
+        with (
+            patch("flink_gateway.cursor.time.sleep", side_effect=sleep_calls.append),
+            patch("flink_gateway.cursor.time.monotonic", side_effect=monotonic_seq),
+        ):
+            cur.execute("SELECT id FROM t")
+            with pytest.raises(TimeoutError, match="idle_timeout"):
+                cur.fetchall()
+
+        assert sleep_calls, "expected at least one sleep call"
+        assert sleep_calls[0] == pytest.approx(0.05)
+
+    def test_no_timeout_defaults_unchanged(self):
+        """With no timeouts set, behavior is identical to the original."""
+        client = _mock_client()
+        cols = _columns(("v", "INTEGER", False))
+        client.execute_statement.return_value = "op-1"
+        client.fetch_results.side_effect = [
+            _ready_result(cols, [[1], [2]], next_uri="/v3/.../result/1"),
+            _ready_result(cols, [[3], [4]]),
+            _eos_result(),
+        ]
+
+        conn = _make_connection(client)
+        cur = conn.cursor()
+        cur.execute("SELECT v FROM t")
+        assert cur.fetchall() == [(1,), (2,), (3,), (4,)]

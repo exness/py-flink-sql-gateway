@@ -28,6 +28,10 @@ class FlinkSqlGatewayError(OperationalError):
     """Raised when a Flink SQL Gateway REST call fails."""
 
 
+class TimeoutError(OperationalError):
+    """Raised when a query or streaming iteration exceeds a configured timeout."""
+
+
 class ProgrammingError(DatabaseError):
     """Exception for programming errors.
 
