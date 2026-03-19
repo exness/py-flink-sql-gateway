@@ -23,10 +23,14 @@ class Connection:
         client: FlinkSqlGatewayClient,
         session_handle: str,
         *,
+        query_timeout: float | None = None,
+        idle_timeout: float | None = None,
         _owns_client: bool = True,
     ) -> None:
         self._client = client
         self._session_handle = session_handle
+        self._query_timeout = query_timeout
+        self._idle_timeout = idle_timeout
         self._owns_client = _owns_client
         self._closed = False
 
@@ -79,7 +83,11 @@ class Connection:
         """Create a new Cursor bound to this connection."""
         if self._closed:
             raise ProgrammingError("connection is closed")
-        return Cursor(self)
+        return Cursor(
+            self,
+            query_timeout=self._query_timeout,
+            idle_timeout=self._idle_timeout,
+        )
 
 
 def connect(
@@ -88,6 +96,8 @@ def connect(
     properties: dict[str, str] | None = None,
     api_version: str = "v3",
     http_client: httpx.Client | None = None,
+    query_timeout: float | None = None,
+    idle_timeout: float | None = None,
 ) -> Connection:
     """Open a connection to a Flink SQL Gateway.
 
@@ -99,6 +109,12 @@ def connect(
         api_version: REST API version (default ``"v3"``).
         http_client: Optional pre-configured :class:`httpx.Client`
             for custom SSL, timeouts, authentication, etc.
+        query_timeout: Maximum seconds a query may run
+            before raising :class:`~flink_gateway.TimeoutError`.
+            ``None`` means no limit.
+        idle_timeout: Maximum seconds to wait between rows during streaming
+            iteration before raising :class:`~flink_gateway.TimeoutError`.
+            ``None`` means no limit.
 
     Returns:
         A :class:`Connection` instance.
@@ -113,4 +129,10 @@ def connect(
     except Exception:
         client.close()
         raise
-    return Connection(client, session_handle, _owns_client=True)
+    return Connection(
+        client,
+        session_handle,
+        query_timeout=query_timeout,
+        idle_timeout=idle_timeout,
+        _owns_client=True,
+    )

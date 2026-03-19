@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 from typing import TYPE_CHECKING, Any, Iterator, Sequence
 
-from flink_gateway.exceptions import InterfaceError, OperationalError, ProgrammingError
+from flink_gateway.exceptions import InterfaceError, ProgrammingError, TimeoutError
 from flink_gateway.models import (
     ColumnInfo,
     ExecuteStatementRequest,
@@ -22,7 +22,6 @@ if TYPE_CHECKING:
 _POLL_INTERVAL = 1.0  # seconds
 _RESULTS_MIN_BACKOFF = 0.1  # seconds
 _RESULTS_MAX_BACKOFF = 1.0  # seconds
-_DEFAULT_QUERY_TIMEOUT = 300.0  # 5 minutes
 
 # PEP 249 description row: (name, type_code, display_size, internal_size,
 #                           precision, scale, null_ok)
@@ -38,7 +37,11 @@ class Cursor:
     arraysize: int = 1
 
     def __init__(
-        self, connection: Connection, *, query_timeout: float = _DEFAULT_QUERY_TIMEOUT
+        self,
+        connection: Connection,
+        *,
+        query_timeout: float | None = None,
+        idle_timeout: float | None = None,
     ) -> None:
         self._connection = connection
         self._closed = False
@@ -48,6 +51,8 @@ class Cursor:
         self._rows_iterator: Iterator[tuple[Any, ...]] | None = None
         self._columns: list[ColumnInfo] = []
         self._query_timeout = query_timeout
+        self._idle_timeout = idle_timeout
+        self._query_deadline: float = float("inf")
 
     # ── PEP 249 attributes ─────────────────────────────────────────
 
@@ -91,7 +96,9 @@ class Cursor:
     # ── Execution ──────────────────────────────────────────────────
 
     def execute(
-        self, operation: str, parameters: Sequence[Any] | None = None
+        self,
+        operation: str,
+        parameters: Sequence[Any] | None = None,
     ) -> Cursor:
         """Execute a SQL statement.
 
@@ -112,6 +119,11 @@ class Cursor:
         self._rowcount = -1
         self._rows_iterator = None
         self._columns = []
+        self._query_deadline = (
+            time.monotonic() + self._query_timeout
+            if self._query_timeout is not None
+            else float("inf")
+        )
 
         if parameters is not None:
             raise InterfaceError("parameterized queries are not yet supported")
@@ -228,15 +240,12 @@ class Cursor:
         """Poll ``fetch_results`` until the result is no longer NOT_READY."""
         client = self._connection.client
         session = self._connection.session_handle
-        deadline = time.monotonic() + self._query_timeout
         while True:
             result = client.fetch_results(session, op_handle, "0", "json")
             if result.result_type != ResultType.NOT_READY:
                 return result
-            if time.monotonic() > deadline:
-                raise OperationalError(
-                    f"query timed out after {self._query_timeout}s waiting for results"
-                )
+            if time.monotonic() > self._query_deadline:
+                raise TimeoutError(f"query timed out after {self._query_timeout}s")
             time.sleep(_POLL_INTERVAL)
 
     def _build_description(self) -> None:
@@ -271,6 +280,12 @@ class Cursor:
         client = self._connection.client
         session = self._connection.session_handle
 
+        idle_deadline: float = (
+            time.monotonic() + self._idle_timeout
+            if self._idle_timeout is not None
+            else float("inf")
+        )
+
         data = initial_data
         token = next_token
         pos = 0
@@ -281,6 +296,11 @@ class Cursor:
                 row = data[pos]
                 pos += 1
                 yield self._decode_row(row)
+                if time.monotonic() >= self._query_deadline:
+                    raise TimeoutError(
+                        f"streaming iteration stopped: query_timeout of "
+                        f"{self._query_timeout}s exceeded"
+                    )
                 continue
 
             # Fetch next page.
@@ -295,11 +315,26 @@ class Cursor:
             pos = 0
 
             if not data:
-                time.sleep(backoff)
-                if backoff < _RESULTS_MAX_BACKOFF:
-                    backoff = min(backoff * 2, _RESULTS_MAX_BACKOFF)
+                now = time.monotonic()
+                if now >= self._query_deadline:
+                    raise TimeoutError(
+                        f"streaming iteration stopped: query_timeout of "
+                        f"{self._query_timeout}s exceeded"
+                    )
+                if now >= idle_deadline:
+                    raise TimeoutError(
+                        f"streaming iteration stopped: idle_timeout of "
+                        f"{self._idle_timeout}s exceeded"
+                    )
+                sleep_dur = min(
+                    backoff, self._query_deadline - now, idle_deadline - now
+                )
+                time.sleep(sleep_dur)
+                backoff = min(backoff * 2, _RESULTS_MAX_BACKOFF)
             else:
                 backoff = _RESULTS_MIN_BACKOFF
+                if self._idle_timeout is not None:
+                    idle_deadline = time.monotonic() + self._idle_timeout
 
     def _decode_row(self, row: RowData) -> tuple[Any, ...]:
         """Decode a single RowData into a Python tuple."""
