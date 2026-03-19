@@ -77,10 +77,39 @@ import httpx
 client = httpx.Client(verify="/path/to/ca.crt", timeout=60.0)
 with connect("https://localhost:8083", http_client=client) as conn:
     ...
+```
 
-# Set a query timeout (default: 300s)
-with conn.cursor(query_timeout=60.0) as cur:
-    cur.execute("SELECT ...")
+### Timeouts
+
+Both timeouts are `None` by default — no implicit interruptions.
+
+```python
+from flink_gateway import connect, TimeoutError
+
+# query_timeout: hard wall-clock limit on the entire query (including streaming iteration).
+# Raise TimeoutError once the deadline is exceeded, regardless of whether rows are arriving.
+with connect("http://localhost:8083", query_timeout=60.0) as conn:
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM orders")
+        for row in cur:
+            process(row)
+
+# idle_timeout: raise TimeoutError if no new rows arrive within the given window.
+# Useful for streaming queries where silence means the source is done or stuck.
+with connect("http://localhost:8083", idle_timeout=30.0) as conn:
+    with conn.cursor() as cur:
+        count = 0
+        try:
+            cur.execute("SELECT * FROM orders")
+            for row in cur:
+                process(row)
+                count += 1
+        except TimeoutError:
+            print(f"no new rows for 30s, processed {count} rows so far")
+
+# Both can be combined: stop as soon as either limit is hit.
+with connect("http://localhost:8083", query_timeout=300.0, idle_timeout=30.0) as conn:
+    ...
 ```
 
 ### Low-level REST access
