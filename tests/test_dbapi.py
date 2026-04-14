@@ -887,3 +887,131 @@ class TestStreamingTimeouts:
         cur = conn.cursor()
         cur.execute("SELECT v FROM t")
         assert cur.fetchall() == [(1,), (2,), (3,), (4,)]
+
+
+class TestPerExecuteTimeouts:
+    """Tests for per-execute query_timeout and idle_timeout overrides."""
+
+    def test_execute_query_timeout_overrides_connection_default(self):
+        """Per-execute query_timeout should override connection-level default."""
+        client = _mock_client()
+        cols = _columns(("id", "INTEGER", False))
+        client.execute_statement.return_value = "op-1"
+        client.fetch_results.side_effect = [
+            _ready_result(cols, [[1]], next_uri="/v3/.../result/1"),
+            _empty_payload(cols, "/v3/.../result/2"),
+            _empty_payload(cols, "/v3/.../result/3"),
+        ]
+
+        # Connection has query_timeout=10.0, but execute overrides with 1.0
+        #   0.0 → execute(): _query_deadline = 0.0 + 1.0 = 1.0
+        #   0.0 → post-yield row 1       (ok)
+        #   0.5 → empty-page 1 check     (ok)
+        #   1.5 → empty-page 2 check     → RAISE
+        monotonic_seq = iter([0.0, 0.0, 0.5, 1.5])
+
+        conn = _make_connection(client, query_timeout=10.0)
+        cur = conn.cursor()
+        with (
+            patch("flink_gateway.cursor.time.sleep"),
+            patch("flink_gateway.cursor.time.monotonic", side_effect=monotonic_seq),
+        ):
+            cur.execute("SELECT id FROM t", query_timeout=1.0)
+            with pytest.raises(TimeoutError, match="query_timeout"):
+                cur.fetchall()
+
+    def test_execute_idle_timeout_overrides_connection_default(self):
+        """Per-execute idle_timeout should override connection-level default."""
+        client = _mock_client()
+        cols = _columns(("id", "INTEGER", False))
+        client.execute_statement.return_value = "op-1"
+        client.fetch_results.side_effect = [
+            _ready_result(cols, [[1]], next_uri="/v3/.../result/1"),
+            _empty_payload(cols, "/v3/.../result/2"),
+            _empty_payload(cols, "/v3/.../result/3"),
+        ]
+
+        # Connection has idle_timeout=60.0, but execute overrides with 0.3
+        #   0.0 → _iter_rows: idle_deadline = 0.3
+        #   0.0 → post-yield row 1   → ok
+        #   0.25 → empty-page 1 check → ok (0.25 < 0.3)
+        #   0.35 → empty-page 2 check → RAISE (0.35 >= 0.3)
+        monotonic_seq = iter([0.0, 0.0, 0.25, 0.35])
+
+        conn = _make_connection(client, idle_timeout=60.0)
+        cur = conn.cursor()
+        with (
+            patch("flink_gateway.cursor.time.sleep"),
+            patch("flink_gateway.cursor.time.monotonic", side_effect=monotonic_seq),
+        ):
+            cur.execute("SELECT id FROM t", idle_timeout=0.3)
+            with pytest.raises(TimeoutError, match="idle_timeout"):
+                cur.fetchall()
+
+    def test_execute_none_disables_connection_timeout(self):
+        """Passing None to execute() should disable the connection-level timeout."""
+        client = _mock_client()
+        cols = _columns(("v", "INTEGER", False))
+        client.execute_statement.return_value = "op-1"
+        client.fetch_results.side_effect = [
+            _ready_result(cols, [[1], [2]], next_uri="/v3/.../result/1"),
+            _ready_result(cols, [[3], [4]]),
+            _eos_result(),
+        ]
+
+        # Connection has aggressive timeouts, but execute disables them.
+        conn = _make_connection(client, query_timeout=0.001, idle_timeout=0.001)
+        cur = conn.cursor()
+        cur.execute("SELECT v FROM t", query_timeout=None, idle_timeout=None)
+        rows = cur.fetchall()
+        assert rows == [(1,), (2,), (3,), (4,)]
+
+    def test_omitted_execute_timeout_uses_connection_default(self):
+        """When execute() omits timeout kwargs, connection defaults are used."""
+        client = _mock_client()
+        cols = _columns(("id", "INTEGER", False))
+        client.execute_statement.return_value = "op-1"
+        client.fetch_results.side_effect = [
+            _ready_result(cols, [[1]], next_uri="/v3/.../result/1"),
+            _empty_payload(cols, "/v3/.../result/2"),
+            _empty_payload(cols, "/v3/.../result/3"),
+        ]
+
+        # Connection has query_timeout=1.0; execute() does NOT override.
+        monotonic_seq = iter([0.0, 0.0, 0.5, 1.5])
+
+        conn = _make_connection(client, query_timeout=1.0)
+        cur = conn.cursor()
+        with (
+            patch("flink_gateway.cursor.time.sleep"),
+            patch("flink_gateway.cursor.time.monotonic", side_effect=monotonic_seq),
+        ):
+            cur.execute("SELECT id FROM t")  # no override
+            with pytest.raises(TimeoutError, match="query_timeout"):
+                cur.fetchall()
+
+    def test_per_execute_timeout_does_not_persist_across_executions(self):
+        """Per-execute timeout should not bleed into the next execute() call."""
+        client = _mock_client()
+        cols = _columns(("v", "INTEGER", False))
+        client.execute_statement.return_value = "op-1"
+
+        # First execute: no connection timeout, per-execute query_timeout=1.0
+        # Second execute: no per-execute override → should use connection default (None)
+        client.fetch_results.side_effect = [
+            # First query — single page, no next_uri
+            _ready_result(cols, [[1]]),
+            # Second query — single page, no next_uri
+            _ready_result(cols, [[2], [3]]),
+        ]
+
+        conn = _make_connection(client)  # no connection-level timeout
+        cur = conn.cursor()
+
+        cur.execute("SELECT 1", query_timeout=1.0)
+        assert cur.fetchall() == [(1,)]
+
+        # Second execute without per-execute override falls back to None
+        cur.execute("SELECT 2")
+        rows = cur.fetchall()
+        assert rows == [(2,), (3,)]

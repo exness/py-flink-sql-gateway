@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import enum
 import time
-from typing import TYPE_CHECKING, Any, Iterator, Sequence
+from typing import TYPE_CHECKING, Any, Iterator, Sequence, Union
 
 from flink_gateway.exceptions import InterfaceError, ProgrammingError, TimeoutError
 from flink_gateway.models import (
@@ -52,6 +53,8 @@ class Cursor:
         self._columns: list[ColumnInfo] = []
         self._query_timeout = query_timeout
         self._idle_timeout = idle_timeout
+        self._effective_query_timeout: float | None = query_timeout
+        self._effective_idle_timeout: float | None = idle_timeout
         self._query_deadline: float = float("inf")
 
     # ── PEP 249 attributes ─────────────────────────────────────────
@@ -95,16 +98,37 @@ class Cursor:
 
     # ── Execution ──────────────────────────────────────────────────
 
+    class _Sentinel(enum.Enum):
+        """Sentinel value to distinguish 'not provided' from ``None``."""
+
+        MISSING = enum.auto()
+
+    _MISSING: _Sentinel = _Sentinel.MISSING
+
     def execute(
         self,
         operation: str,
         parameters: Sequence[Any] | None = None,
+        *,
+        query_timeout: Union[float, None, _Sentinel] = _MISSING,
+        idle_timeout: Union[float, None, _Sentinel] = _MISSING,
     ) -> Cursor:
         """Execute a SQL statement.
 
         Args:
             operation: The SQL string.
             parameters: Not yet supported.
+            query_timeout: Maximum seconds this query may run before raising
+                :class:`~flink_gateway.TimeoutError`.  Overrides the
+                connection-level default for this execution only.
+                Pass ``None`` to explicitly disable the timeout.
+                Omit (or leave as default) to use the connection-level value.
+            idle_timeout: Maximum seconds to wait between rows during
+                streaming iteration before raising
+                :class:`~flink_gateway.TimeoutError`.  Overrides the
+                connection-level default for this execution only.
+                Pass ``None`` to explicitly disable the timeout.
+                Omit (or leave as default) to use the connection-level value.
 
         Returns:
             self (for chaining).
@@ -114,15 +138,27 @@ class Cursor:
         # Close any previous operation.
         self._close_current_operation()
 
+        # Resolve effective timeouts: per-execute overrides > connection defaults.
+        eff_qt: float | None = (
+            self._query_timeout
+            if isinstance(query_timeout, self._Sentinel)
+            else query_timeout
+        )
+        eff_it: float | None = (
+            self._idle_timeout
+            if isinstance(idle_timeout, self._Sentinel)
+            else idle_timeout
+        )
+        self._effective_query_timeout = eff_qt
+        self._effective_idle_timeout = eff_it
+
         # Reset state.
         self._description = None
         self._rowcount = -1
         self._rows_iterator = None
         self._columns = []
         self._query_deadline = (
-            time.monotonic() + self._query_timeout
-            if self._query_timeout is not None
-            else float("inf")
+            time.monotonic() + eff_qt if eff_qt is not None else float("inf")
         )
 
         if parameters is not None:
@@ -245,7 +281,9 @@ class Cursor:
             if result.result_type != ResultType.NOT_READY:
                 return result
             if time.monotonic() > self._query_deadline:
-                raise TimeoutError(f"query timed out after {self._query_timeout}s")
+                raise TimeoutError(
+                    f"query timed out after {self._effective_query_timeout}s"
+                )
             time.sleep(_POLL_INTERVAL)
 
     def _build_description(self) -> None:
@@ -280,9 +318,10 @@ class Cursor:
         client = self._connection.client
         session = self._connection.session_handle
 
+        effective_idle_timeout = self._effective_idle_timeout
         idle_deadline: float = (
-            time.monotonic() + self._idle_timeout
-            if self._idle_timeout is not None
+            time.monotonic() + effective_idle_timeout
+            if effective_idle_timeout is not None
             else float("inf")
         )
 
@@ -299,7 +338,7 @@ class Cursor:
                 if time.monotonic() >= self._query_deadline:
                     raise TimeoutError(
                         f"streaming iteration stopped: query_timeout of "
-                        f"{self._query_timeout}s exceeded"
+                        f"{self._effective_query_timeout}s exceeded"
                     )
                 continue
 
@@ -319,12 +358,12 @@ class Cursor:
                 if now >= self._query_deadline:
                     raise TimeoutError(
                         f"streaming iteration stopped: query_timeout of "
-                        f"{self._query_timeout}s exceeded"
+                        f"{self._effective_query_timeout}s exceeded"
                     )
                 if now >= idle_deadline:
                     raise TimeoutError(
                         f"streaming iteration stopped: idle_timeout of "
-                        f"{self._idle_timeout}s exceeded"
+                        f"{effective_idle_timeout}s exceeded"
                     )
                 sleep_dur = min(
                     backoff, self._query_deadline - now, idle_deadline - now
@@ -333,8 +372,8 @@ class Cursor:
                 backoff = min(backoff * 2, _RESULTS_MAX_BACKOFF)
             else:
                 backoff = _RESULTS_MIN_BACKOFF
-                if self._idle_timeout is not None:
-                    idle_deadline = time.monotonic() + self._idle_timeout
+                if effective_idle_timeout is not None:
+                    idle_deadline = time.monotonic() + effective_idle_timeout
 
     def _decode_row(self, row: RowData) -> tuple[Any, ...]:
         """Decode a single RowData into a Python tuple."""
