@@ -15,6 +15,10 @@ from decimal import Decimal
 import pytest
 
 from flink_gateway import connect
+from flink_gateway.exceptions import TimeoutError as FlinkTimeoutError
+
+# Flink job statuses that are terminal (the job has stopped for good).
+_TERMINAL_JOB_STATES = {"FINISHED", "CANCELED", "FAILED", "SUSPENDED"}
 
 # ── Helpers ────────────────────────────────────────────────────────────
 
@@ -23,6 +27,36 @@ def _exec(conn, sql: str) -> None:
     """Execute a DDL/DML statement."""
     with conn.cursor() as cur:
         cur.execute(sql)
+
+
+def _job_statuses(conn) -> dict[str, str]:
+    """Return {job_id: STATUS} for every job known to the cluster."""
+    with conn.cursor() as cur:
+        cur.execute("SHOW JOBS")
+        # SHOW JOBS returns (job_id, job_name, status, start_time)
+        return {
+            row[0]: (str(row[2]).upper() if row[2] else "") for row in cur.fetchall()
+        }
+
+
+def _await_job_terminal(
+    conn,
+    job_id: str,
+    timeout: float = 60.0,
+    interval: float = 2.0,
+) -> str:
+    """Poll SHOW JOBS until *job_id* reaches a terminal state; return its status."""
+    deadline = time.time() + timeout
+    last = ""
+    while time.time() < deadline:
+        last = _job_statuses(conn).get(job_id, "")
+        if last in _TERMINAL_JOB_STATES:
+            return last
+        time.sleep(interval)
+    raise AssertionError(
+        f"job {job_id} did not reach a terminal state within {timeout}s "
+        f"(last status={last!r})"
+    )
 
 
 def _query_rows(conn, sql: str, timeout: float = 10.0) -> list[tuple]:
@@ -513,3 +547,46 @@ def test_filesystem_row_complex_type(flink_gateway_url: str):
     assert r[11] == datetime.time(9, 15, 30)
     assert r[12] == datetime.datetime(2025, 12, 25, 9, 15, 30, 456000)
     assert isinstance(r[13], datetime.datetime)
+
+
+# ── Test: query_timeout cancels the running job ───────────────────────
+
+
+@pytest.mark.integration
+def test_query_timeout_cancels_running_job(flink_gateway_url: str):
+    """A query_timeout must cancel the streaming job on the cluster."""
+    with connect(flink_gateway_url, query_timeout=5.0) as conn:
+        _exec(
+            conn,
+            """
+            CREATE TABLE timeout_src (
+                id BIGINT
+            ) WITH (
+                'connector' = 'datagen',
+                'rows-per-second' = '1'
+            )
+            """,
+        )
+
+        jobs_before = set(_job_statuses(conn))
+
+        # A streaming SELECT over datagen never completes; the query_timeout
+        # fires while rows are still arriving and must cancel the job.
+        with pytest.raises(FlinkTimeoutError):
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM timeout_src")
+                cur.fetchall()
+
+        # Identify the job our query started (the only one new since `before`).
+        new_jobs = set(_job_statuses(conn)) - jobs_before
+        assert (
+            len(new_jobs) == 1
+        ), f"expected exactly one new job from the streaming SELECT, got {new_jobs}"
+        job_id = new_jobs.pop()
+
+        # The job must reach CANCELED — proof the timeout stopped it on the
+        # cluster, not just client-side.
+        status = _await_job_terminal(conn, job_id)
+        assert (
+            status == "CANCELED"
+        ), f"expected job {job_id} to be CANCELED after timeout, got {status}"

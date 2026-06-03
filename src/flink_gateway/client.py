@@ -244,7 +244,7 @@ class FlinkSqlGatewayClient:
         session_handle: str,
         operation_handle: str,
     ) -> str:
-        """DELETE /sessions/{sh}/operations/{oh}.
+        """DELETE /sessions/{sh}/operations/{oh}/close.
 
         Returns:
             The operation status after closure.
@@ -254,6 +254,7 @@ class FlinkSqlGatewayClient:
             session_handle,
             "operations",
             operation_handle,
+            "close",
         )
         resp = self._client.delete(url)
         self._check_response(resp, "close operation")
