@@ -373,7 +373,7 @@ class TestOperationManagement:
 
     def test_close_operation(self):
         def handler(request: httpx.Request) -> httpx.Response:
-            assert request.url.path == "/v3/sessions/s/operations/op"
+            assert request.url.path == "/v3/sessions/s/operations/op/close"
             assert request.method == "DELETE"
             return _json_response({"status": "CLOSED"})
 

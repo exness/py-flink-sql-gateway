@@ -281,6 +281,7 @@ class Cursor:
             if result.result_type != ResultType.NOT_READY:
                 return result
             if time.monotonic() > self._query_deadline:
+                self._close_current_operation()
                 raise TimeoutError(
                     f"query timed out after {self._effective_query_timeout}s"
                 )
@@ -336,6 +337,7 @@ class Cursor:
                 pos += 1
                 yield self._decode_row(row)
                 if time.monotonic() >= self._query_deadline:
+                    self._close_current_operation()
                     raise TimeoutError(
                         f"streaming iteration stopped: query_timeout of "
                         f"{self._effective_query_timeout}s exceeded"
@@ -356,11 +358,13 @@ class Cursor:
             if not data:
                 now = time.monotonic()
                 if now >= self._query_deadline:
+                    self._close_current_operation()
                     raise TimeoutError(
                         f"streaming iteration stopped: query_timeout of "
                         f"{self._effective_query_timeout}s exceeded"
                     )
                 if now >= idle_deadline:
+                    self._close_current_operation()
                     raise TimeoutError(
                         f"streaming iteration stopped: idle_timeout of "
                         f"{effective_idle_timeout}s exceeded"
